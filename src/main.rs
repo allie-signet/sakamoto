@@ -181,17 +181,51 @@ async fn handle_command(
     http: &Arc<HttpClient>,
     standby: &Arc<Standby>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let args: Vec<&str> = command.split_whitespace().collect();
+    let args: Vec<&str> = command
+        .trim()
+        .splitn(2, |c: char| c.is_whitespace())
+        .collect();
     match args[0] {
         "add_react" => {
-            if args.len() < 3 {
-                http.create_message(msg.channel_id).content("invalid usage: proper `sakamoto! add_react [content to trigger on] [emojis separated by spaces]`")?.exec().await?;
+            if args.len() < 2 {
+                http.create_message(msg.channel_id)
+                    .content("invalid usage: proper `sakamoto! add_react [content to trigger on]`")?
+                    .exec()
+                    .await?;
             } else {
+                http.create_message(msg.channel_id)
+                    .content(
+                        "ok! now please send a message containing the reacts, separated by spaces.",
+                    )?
+                    .exec()
+                    .await?;
+                let author = msg.author.id.clone();
+                let response_content = tokio::time::timeout(
+                    Duration::from_secs(60 * 10),
+                    standby.wait_for(msg.guild_id.unwrap(), move |event: &Event| {
+                        if let Event::MessageCreate(ref new_msg) = event {
+                            author == new_msg.author.id
+                        } else {
+                            false
+                        }
+                    }),
+                )
+                .await?
+                .map(|v| {
+                    if let Event::MessageCreate(new_msg) = v {
+                        return new_msg;
+                    } else {
+                        unreachable!()
+                    }
+                })?;
+
                 DB.insert(
                     args[1],
                     serde_json::to_vec(&Response::React(
-                        (&args[2..])
-                            .iter()
+                        response_content
+                            .0
+                            .content
+                            .split_whitespace()
                             .map(|v| v.to_string())
                             .collect::<Vec<String>>(),
                     ))?,
