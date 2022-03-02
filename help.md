@@ -6,5 +6,5 @@ usage:
 (you can use https://glitchii.github.io/embedbuilder/ to get the embed json)
 -> sakamoto! add_message [tag to trigger on]
 -> sakamoto! list_triggers
--> sakamoto! remove [tag]
+-> sakamoto! remove_trigger [tag]
 ```
