@@ -8,4 +8,4 @@ FROM debian:buster-slim
 RUN apt-get update && apt-get install -y curl 
 COPY --from=builder /usr/src/sakamoto/target/release/sakamoto .
 
-CMD ["./mai"]
+CMD ["./sakamoto"]
