@@ -110,10 +110,10 @@ async fn handle_event(
 
             if let Some(response) = DB.get(&trimmed)? {
                 log_err!(send_response(msg.0, trimmed.clone(), &trimmed, &response, &http).await);
-            } else if let Some((key, response)) = DB
-                .get_lt(&trimmed)?
-                .filter(|(k, _)| trimmed.contains(std::str::from_utf8(k).unwrap()))
-            {
+            } else if let Some((key, response)) = DB.get_lt(&trimmed)?.filter(|(k, _)| {
+                let k = std::str::from_utf8(k).unwrap();
+                !trimmed.starts_with("sakamoto!") && trimmed.contains(k)
+            }) {
                 let key = std::str::from_utf8(&key)?;
                 log_err!(send_response(msg.0, trimmed, key, &response, &http).await);
             } else if msg
