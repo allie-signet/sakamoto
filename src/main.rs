@@ -48,6 +48,7 @@ enum Response {
     React(Vec<String>),
     SimpleMessage(String),
     Embed(Embed),
+    Templated(String, String),
 }
 
 // ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^  ^~^
@@ -105,12 +106,21 @@ async fn handle_event(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match event {
         Event::MessageCreate(msg) => {
-            if let Some(response) = DB.get(msg.content.trim().to_lowercase())? {
-                log_err!(send_response(msg.0, &response, &http).await);
-            } else if let Some(_) = msg
+            let trimmed = msg.content.trim().to_lowercase();
+
+            if let Some(response) = DB.get(&trimmed)? {
+                log_err!(send_response(msg.0, trimmed.clone(), &trimmed, &response, &http).await);
+            } else if let Some((key, response)) = DB
+                .get_lt(&trimmed)?
+                .filter(|(k, _)| trimmed.contains(std::str::from_utf8(k).unwrap()))
+            {
+                let key = std::str::from_utf8(&key)?;
+                log_err!(send_response(msg.0, trimmed, key, &response, &http).await);
+            } else if msg
                 .member
                 .as_ref()
                 .filter(|member| member.roles.iter().any(|v| MOD_ROLE_IDS.contains(v)))
+                .is_some()
             {
                 if let Some(command) = msg
                     .0
@@ -135,12 +145,16 @@ async fn handle_event(
 
 async fn send_response(
     msg: Message,
+    trimmed_msg: String,
+    key: &str,
     response: &[u8],
     http: &Arc<HttpClient>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let response = serde_json::from_slice(&response[..])?;
+    let response = serde_json::from_slice(response)?;
+    let tag_equals_key = trimmed_msg == key;
+
     match response {
-        Response::React(emojis) => {
+        Response::React(emojis) if tag_equals_key => {
             for e in emojis {
                 let react = if let Some(id) = e
                     .strip_prefix(":custom:")
@@ -156,18 +170,36 @@ async fn send_response(
                     .await?;
             }
         }
-        Response::SimpleMessage(content) => {
+        Response::SimpleMessage(content) if tag_equals_key => {
             http.create_message(msg.channel_id)
                 .content(&content)?
                 .exec()
                 .await?;
         }
-        Response::Embed(embed) => {
+        Response::Embed(embed) if tag_equals_key => {
             http.create_message(msg.channel_id)
                 .embeds(&[embed])?
                 .exec()
                 .await?;
         }
+        Response::Templated(base, template) if msg.content.trim().starts_with(&base) => {
+            use minijinja::Environment;
+            let args = msg.content.trim().strip_prefix(&base).unwrap();
+            let arg_list: Vec<&str> = args.split_whitespace().collect();
+
+            let mut env = Environment::new();
+            env.add_template("nya", &template)?;
+            let tmpl = env.get_template("nya")?;
+            http.create_message(msg.channel_id)
+                .content(&tmpl.render(minijinja::context! {
+                    message => msg,
+                    args,
+                    arg_list
+                })?)?
+                .exec()
+                .await?;
+        }
+        _ => {}
     }
 
     Ok(())
@@ -199,7 +231,7 @@ async fn handle_command(
                     )?
                     .exec()
                     .await?;
-                let author = msg.author.id.clone();
+                let author = msg.author.id;
                 let response_content = tokio::time::timeout(
                     Duration::from_secs(60 * 10),
                     standby.wait_for(msg.guild_id.unwrap(), move |event: &Event| {
@@ -213,7 +245,7 @@ async fn handle_command(
                 .await?
                 .map(|v| {
                     if let Event::MessageCreate(new_msg) = v {
-                        return new_msg;
+                        new_msg
                     } else {
                         unreachable!()
                     }
@@ -246,7 +278,7 @@ async fn handle_command(
                     .await?;
             } else {
                 http.create_message(msg.channel_id).content("ok! now please send a message containing the content you want, bracketed in \\`\\`\\`.")?.exec().await?;
-                let author = msg.author.id.clone();
+                let author = msg.author.id;
                 let response_content = tokio::time::timeout(
                     Duration::from_secs(60 * 10),
                     standby.wait_for(msg.guild_id.unwrap(), move |event: &Event| {
@@ -260,7 +292,7 @@ async fn handle_command(
                 .await?
                 .map(|v| {
                     if let Event::MessageCreate(new_msg) = v {
-                        return new_msg;
+                        new_msg
                     } else {
                         unreachable!()
                     }
@@ -292,7 +324,7 @@ async fn handle_command(
                     .await?;
             } else {
                 http.create_message(msg.channel_id).content("ok! now please send a message containing the json of the embed you want, bracketed in \\`\\`\\` or as an attachment.")?.exec().await?;
-                let author = msg.author.id.clone();
+                let author = msg.author.id;
                 let mut response_content = tokio::time::timeout(
                     Duration::from_secs(60 * 10),
                     standby.wait_for(msg.guild_id.unwrap(), move |event: &Event| {
@@ -308,7 +340,7 @@ async fn handle_command(
                 .await?
                 .map(|v| {
                     if let Event::MessageCreate(new_msg) = v {
-                        return new_msg;
+                        new_msg
                     } else {
                         unreachable!()
                     }
@@ -339,6 +371,59 @@ async fn handle_command(
                     .await?;
             }
         }
+        "add_template" => {
+            if args.len() < 2 {
+                http.create_message(msg.channel_id)
+                    .content(
+                        "invalid usage: proper `sakamoto! add_template [content to trigger on]`",
+                    )?
+                    .exec()
+                    .await?;
+            } else {
+                http.create_message(msg.channel_id).content("ok! now please send a message containing the code of the template you want, bracketed in \\`\\`\\` or as an attachment.")?.exec().await?;
+                let author = msg.author.id;
+                let mut response_content = tokio::time::timeout(
+                    Duration::from_secs(60 * 10),
+                    standby.wait_for(msg.guild_id.unwrap(), move |event: &Event| {
+                        if let Event::MessageCreate(ref new_msg) = event {
+                            author == new_msg.author.id
+                                && (new_msg.content.starts_with("```")
+                                    || !new_msg.attachments.is_empty())
+                        } else {
+                            false
+                        }
+                    }),
+                )
+                .await?
+                .map(|v| {
+                    if let Event::MessageCreate(new_msg) = v {
+                        new_msg
+                    } else {
+                        unreachable!()
+                    }
+                })?;
+
+                let embed: String = if let Some(attach) = response_content.attachments.pop() {
+                    REQWEST_CLIENT.get(attach.url).send().await?.text().await?
+                } else {
+                    response_content
+                        .content
+                        .trim_start_matches("```")
+                        .trim_end_matches("```")
+                        .to_owned()
+                };
+
+                DB.insert(
+                    args[1],
+                    serde_json::to_vec(&Response::Templated(args[1].to_owned(), embed))?,
+                )?;
+
+                http.create_message(msg.channel_id)
+                    .content("created new trigger!")?
+                    .exec()
+                    .await?;
+            }
+        }
         "list_triggers" => {
             let mut triggers = String::from("**active response tags:**\n");
             for (k, v) in DB
@@ -354,6 +439,7 @@ async fn handle_command(
                         Response::Embed(_) => "embed",
                         Response::SimpleMessage(_) => "simple message",
                         Response::React(_) => "react",
+                        Response::Templated(_, _) => "templated",
                     }
                 ));
             }
@@ -369,18 +455,16 @@ async fn handle_command(
                     .content("invalid usage: proper `sakamoto! remove [content to trigger on]`")?
                     .exec()
                     .await?;
+            } else if (DB.remove(args[1])?).is_some() {
+                http.create_message(msg.channel_id)
+                    .content("trigger deleted!")?
+                    .exec()
+                    .await?;
             } else {
-                if let Some(_) = DB.remove(args[1])? {
-                    http.create_message(msg.channel_id)
-                        .content("trigger deleted!")?
-                        .exec()
-                        .await?;
-                } else {
-                    http.create_message(msg.channel_id)
-                        .content("trigger not found")?
-                        .exec()
-                        .await?;
-                }
+                http.create_message(msg.channel_id)
+                    .content("trigger not found")?
+                    .exec()
+                    .await?;
             }
         }
         "help" => {
